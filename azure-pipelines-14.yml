@@ -1,0 +1,146 @@
+trigger:
+  - master
+
+variables:
+  # Azure Resource Manager service connection
+  azureSubscription: 'YourServiceConnectionName'
+
+  # Azure App Service name
+  webAppName: 'YourLinuxApp'
+
+  # Azure Resource Group
+  resourceGroupName: 'YourRG'
+
+  # Azure DevOps environment
+  environmentName: 'YourLinuxApp'
+
+  # Build agent
+  vmImageName: 'ubuntu-latest'
+
+  # Node.js version
+  nodeVersion: '22.x'
+
+stages:
+
+# ============================================================
+# BUILD / ARCHIVE
+# ============================================================
+- stage: Build
+  displayName: 'Build and Archive'
+
+  jobs:
+    - job: Build
+      displayName: 'Build Node.js Express Application'
+
+      pool:
+        vmImage: $(vmImageName)
+
+      steps:
+
+        # Install Node.js
+        - task: NodeTool@0
+          displayName: 'Install Node.js'
+          inputs:
+            versionSpec: '$(nodeVersion)'
+
+        # Show Node/npm versions
+        - script: |
+            node --version
+            npm --version
+          displayName: 'Check Node.js Version'
+
+        # Install dependencies
+        - script: |
+            npm ci
+          displayName: 'Install Dependencies'
+
+        # Run tests if your package.json contains a test script
+        - script: |
+            npm test
+          displayName: 'Run Tests'
+          continueOnError: true
+
+        # Optional: build application if package.json has a build script
+        - script: |
+            npm run build
+          displayName: 'Build Application'
+          condition: succeeded()
+          continueOnError: true
+
+        # Remove unnecessary development dependencies before deployment
+        # Comment this step if your application needs devDependencies at runtime.
+        - script: |
+            npm prune --omit=dev
+          displayName: 'Prepare Production Dependencies'
+
+        # Archive application
+        - task: ArchiveFiles@2
+          displayName: 'Archive Application'
+          inputs:
+            rootFolderOrFile: '$(System.DefaultWorkingDirectory)'
+            includeRootFolder: false
+            archiveType: 'zip'
+            archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+            replaceExistingArchive: true
+
+        # Publish ZIP as pipeline artifact
+        - publish: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+          displayName: 'Publish Build Artifact'
+          artifact: drop
+
+
+# ============================================================
+# DEPLOY
+# ============================================================
+- stage: Deploy
+  displayName: 'Deploy to Azure Linux Web App'
+
+  dependsOn: Build
+
+  condition: succeeded()
+
+  jobs:
+    - deployment: Deploy
+      displayName: 'Deploy Node.js Express App'
+
+      environment: $(environmentName)
+
+      pool:
+        vmImage: $(vmImageName)
+
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+
+              # Enable Azure App Service build during deployment
+              - task: AzureAppServiceSettings@1
+                displayName: 'Configure Azure App Service'
+                inputs:
+                  azureSubscription: '$(azureSubscription)'
+                  appName: '$(webAppName)'
+                  resourceGroupName: '$(resourceGroupName)'
+                  appSettings: |
+                    [
+                      {
+                        "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+                        "value": "true",
+                        "slotSetting": false
+                      },
+                      {
+                        "name": "NODE_ENV",
+                        "value": "production",
+                        "slotSetting": false
+                      }
+                    ]
+
+              # Deploy ZIP package
+              - task: AzureWebApp@1
+                displayName: 'Deploy Node.js Express App to Azure'
+                inputs:
+                  azureSubscription: '$(azureSubscription)'
+                  appType: 'webAppLinux'
+                  appName: '$(webAppName)'
+                  runtimeStack: 'NODE|22-lts'
+                  package: '$(Pipeline.Workspace)/drop/$(Build.BuildId).zip'
+                  startUpCommand: 'npm start'
